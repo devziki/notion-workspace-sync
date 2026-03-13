@@ -1,50 +1,106 @@
 /**
  * POST /api/push
  *
- * Manual push endpoint: copies a page from the Main workspace to the Other
- * workspace and stores the page ID pair in Vercel KV for ongoing sync.
+ * Manually pushes a page from the Main workspace into the Other workspace.
+ * Called from the Mapping UI dashboard (Feature 5) or directly via curl/Postman.
  *
  * Request body:
- *   { pageId: string }   — the Main workspace page ID to push
+ * {
+ *   pageId:            string   — Main workspace page ID to push (required)
+ *   targetParentId:    string   — Other workspace database or page ID (required)
+ *   targetParentType?: "database_id" | "page_id"  (default: "database_id")
+ *   titlePropertyName?: string  — title property name in Other DB (default: "Name")
+ *   force?:            boolean  — overwrite even if already pushed (default: false)
+ * }
  *
- * This endpoint is called from the Mapping UI dashboard.
- * All Notion API calls are server-side only.
+ * Response 200 — page pushed successfully:
+ * { ok: true, alreadyExisted: false, mainPageId, otherPageId, syncedAt }
+ *
+ * Response 200 — page already pushed, force not set:
+ * { ok: true, alreadyExisted: true, mainPageId, otherPageId, syncedAt, message }
+ *
+ * Response 400 — missing / invalid params
+ * Response 500 — push failed (detail included)
  */
 
 import { NextRequest, NextResponse } from "next/server";
-
 export const dynamic = "force-dynamic";
 
-// TODO: import getMainNotionClient, getOtherNotionClient, kv once
-// full push logic is implemented.
+import { pushPageToOther } from "@/lib/push";
 
 export async function POST(request: NextRequest) {
-  let pageId: string;
+  // ── Parse body ────────────────────────────────────────────────────────────
+  let body: {
+    pageId?: string;
+    targetParentId?: string;
+    targetParentType?: "database_id" | "page_id";
+    titlePropertyName?: string;
+    force?: boolean;
+  };
+
   try {
-    const body = (await request.json()) as { pageId?: string };
-    if (!body.pageId || typeof body.pageId !== "string") {
-      return NextResponse.json(
-        { error: "pageId is required" },
-        { status: 400 }
-      );
-    }
-    pageId = body.pageId;
+    body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  // TODO: implement full push flow:
-  //   1. Fetch page + blocks from Main workspace
-  //   2. Download + re-upload Notion-hosted images to Other workspace
-  //   3. Recreate page in Other workspace block by block
-  //   4. Store sync:page:{pageId} → { other_id, synced_at } in KV
-  //   5. Return both page IDs
+  if (!body.pageId || typeof body.pageId !== "string") {
+    return NextResponse.json(
+      { error: "pageId is required and must be a string" },
+      { status: 400 }
+    );
+  }
+  if (!body.targetParentId || typeof body.targetParentId !== "string") {
+    return NextResponse.json(
+      { error: "targetParentId is required and must be a string" },
+      { status: 400 }
+    );
+  }
+  if (
+    body.targetParentType !== undefined &&
+    body.targetParentType !== "database_id" &&
+    body.targetParentType !== "page_id"
+  ) {
+    return NextResponse.json(
+      { error: 'targetParentType must be "database_id" or "page_id"' },
+      { status: 400 }
+    );
+  }
 
-  console.log(`[push] Push requested for page: ${pageId}`);
+  // ── Execute push ──────────────────────────────────────────────────────────
+  try {
+    const result = await pushPageToOther({
+      mainPageId: body.pageId,
+      targetParentId: body.targetParentId,
+      targetParentType: body.targetParentType,
+      titlePropertyName: body.titlePropertyName,
+      force: body.force,
+    });
 
-  return NextResponse.json({
-    ok: true,
-    message: "Push endpoint scaffolded — full implementation pending",
-    pageId,
-  });
+    if (result.alreadyExisted) {
+      return NextResponse.json({
+        ok: true,
+        alreadyExisted: true,
+        mainPageId: result.mainPageId,
+        otherPageId: result.otherPageId,
+        syncedAt: result.syncedAt,
+        message:
+          "Page already synced. Pass force:true to overwrite the body, or call the re-sync endpoint to update properties only.",
+      });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      alreadyExisted: false,
+      mainPageId: result.mainPageId,
+      otherPageId: result.otherPageId,
+      syncedAt: result.syncedAt,
+    });
+  } catch (err) {
+    console.error("[push] Push failed:", err);
+    return NextResponse.json(
+      { error: "Push failed", detail: String(err) },
+      { status: 500 }
+    );
+  }
 }

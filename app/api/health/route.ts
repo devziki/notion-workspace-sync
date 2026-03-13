@@ -22,10 +22,19 @@ import {
   checkNotionConnection,
 } from "@/lib/notion";
 
+// Wrap each check so synchronous throws (e.g. missing token) are also caught.
+async function checkWorkspace(getClient: () => ReturnType<typeof getMainNotionClient>) {
+  try {
+    return await checkNotionConnection(getClient());
+  } catch (err) {
+    return { ok: false as const, error: String(err) };
+  }
+}
+
 export async function GET() {
   const [mainResult, otherResult] = await Promise.allSettled([
-    checkNotionConnection(getMainNotionClient()),
-    checkNotionConnection(getOtherNotionClient()),
+    checkWorkspace(getMainNotionClient),
+    checkWorkspace(getOtherNotionClient),
   ]);
 
   const main =

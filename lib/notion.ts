@@ -23,10 +23,10 @@ let otherClient: Client | null = null;
 
 export function getMainNotionClient(): Client {
   if (!mainClient) {
-    const token = process.env.NOTION_MAIN_TOKEN;
+    const token = process.env.NOTION_ZIKI;
     if (!token) {
       throw new Error(
-        "NOTION_MAIN_TOKEN is not set. Add it to your Vercel environment variables."
+        "NOTION_ZIKI is not set. Add it to your Vercel environment variables."
       );
     }
     mainClient = new Client({ auth: token });
@@ -36,10 +36,10 @@ export function getMainNotionClient(): Client {
 
 export function getOtherNotionClient(): Client {
   if (!otherClient) {
-    const token = process.env.NOTION_OTHER_TOKEN;
+    const token = process.env.NOTION_NOTION_STATE;
     if (!token) {
       throw new Error(
-        "NOTION_OTHER_TOKEN is not set. Add it to your Vercel environment variables."
+        "NOTION_NOTION_STATE is not set. Add it to your Vercel environment variables."
       );
     }
     otherClient = new Client({ auth: token });

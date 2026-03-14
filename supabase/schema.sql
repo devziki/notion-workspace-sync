@@ -31,3 +31,10 @@ CREATE TABLE IF NOT EXISTS user_mappings (
   other_user_id   TEXT        NOT NULL UNIQUE,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Enable RLS on all tables.
+-- All access is via the service_role key (server-side only), which bypasses RLS
+-- automatically. No public policies are needed — this just blocks anon key access.
+ALTER TABLE public.project_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sprint_mappings  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_mappings    ENABLE ROW LEVEL SECURITY;

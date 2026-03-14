@@ -7,9 +7,9 @@
  * Mapped properties:
  *   Main "Name / Title"  ↔  Other "Name / Title"   (direct copy)
  *   Main "Due Date"      ↔  Other "Due Date"        (direct copy)
- *   Main "Project"       ↔  Other "Project"         (translated via KV mapping)
- *   Main "Sprints"       ↔  Other "Sprints"         (translated via KV mapping)
- *   Main "Delegated To"  →  Other "Assignee"        (translated via KV user mapping)
+ *   Main "Project"       ↔  Other "Project"         (translated via Supabase mapping)
+ *   Main "Sprints"       ↔  Other "Sprints"         (translated via Supabase mapping)
+ *   Main "Delegated To"  →  Other "Assignee"        (translated via Supabase user mapping)
  *   Other "Assignee"     →  Main "Delegated To"     (reverse user mapping)
  *
  * Property names default to sensible values but can be overridden per env var.
@@ -28,13 +28,15 @@ import {
   getMainIdForOther,
   getSyncLock,
   setSyncLock,
+} from "./kv";
+import {
   getProjectMapping,
   getReverseProjectMapping,
   getSprintMapping,
   getReverseSprintMapping,
   getUserMapping,
   getReverseUserMapping,
-} from "./kv";
+} from "./mappings";
 
 // ---------------------------------------------------------------------------
 // Property name configuration

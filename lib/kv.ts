@@ -2,11 +2,11 @@
  * Vercel KV helpers for the sync engine.
  *
  * Key schema:
- *   sync:page:{main_page_id}          → SyncPagePair
- *   sync:lock:{page_id}               → SyncLock  (Feature 2 — loop prevention)
- *   mapping:project:{main_project_id} → { other_project_id }  (Feature 5)
- *   mapping:sprint:{main_sprint_id}   → { other_sprint_id }   (Feature 5)
- *   mapping:user:{delegate_value}     → { other_notion_user_id } (Feature 5)
+ *   sync:page:{main_page_id}   → SyncPagePair  (Feature 1)
+ *   sync:reverse:{other_id}    → main_page_id  (Feature 1)
+ *   sync:lock:{page_id}        → 1 (10 s TTL)  (Feature 2 — loop prevention)
+ *
+ * Entity mappings (project / sprint / user) live in Supabase — see lib/mappings.ts.
  */
 
 import { kv } from "@vercel/kv";
@@ -77,64 +77,4 @@ export async function getSyncLock(pageId: string): Promise<boolean> {
  */
 export async function setSyncLock(pageId: string): Promise<void> {
   await kv.set(`sync:lock:${pageId}`, 1, { ex: LOCK_TTL_SECONDS });
-}
-
-// ---------------------------------------------------------------------------
-// Entity mappings — populated by Feature 5 (Mapping UI)
-// ---------------------------------------------------------------------------
-
-export async function getProjectMapping(
-  mainProjectId: string
-): Promise<string | null> {
-  const val = await kv.get<{ other_id: string }>(
-    `mapping:project:${mainProjectId}`
-  );
-  return val?.other_id ?? null;
-}
-
-export async function getReverseProjectMapping(
-  otherProjectId: string
-): Promise<string | null> {
-  const val = await kv.get<{ main_id: string }>(
-    `mapping:project:reverse:${otherProjectId}`
-  );
-  return val?.main_id ?? null;
-}
-
-export async function getSprintMapping(
-  mainSprintId: string
-): Promise<string | null> {
-  const val = await kv.get<{ other_id: string }>(
-    `mapping:sprint:${mainSprintId}`
-  );
-  return val?.other_id ?? null;
-}
-
-export async function getReverseSprintMapping(
-  otherSprintId: string
-): Promise<string | null> {
-  const val = await kv.get<{ main_id: string }>(
-    `mapping:sprint:reverse:${otherSprintId}`
-  );
-  return val?.main_id ?? null;
-}
-
-/** Maps a "Delegated To" select value (e.g. "Marek") → Other workspace user ID. */
-export async function getUserMapping(
-  delegateValue: string
-): Promise<string | null> {
-  const val = await kv.get<{ other_user_id: string }>(
-    `mapping:user:${delegateValue}`
-  );
-  return val?.other_user_id ?? null;
-}
-
-/** Reverse: Other workspace user ID → "Delegated To" select value. */
-export async function getReverseUserMapping(
-  otherUserId: string
-): Promise<string | null> {
-  const val = await kv.get<{ delegate_value: string }>(
-    `mapping:user:reverse:${otherUserId}`
-  );
-  return val?.delegate_value ?? null;
 }

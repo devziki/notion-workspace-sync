@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 import { validateWebhook } from "@/lib/webhook";
+import { syncMainToOther } from "@/lib/sync";
 
 export async function POST(request: NextRequest) {
   let body: unknown;
@@ -26,11 +27,23 @@ export async function POST(request: NextRequest) {
     throw response;
   }
 
-  // TODO: route by event type once full sync logic is implemented.
   const event = body as Record<string, unknown>;
-  const eventType = event?.type ?? "unknown";
+  const eventType = (event?.type as string) ?? "unknown";
 
   console.log(`[webhook/main] Received event: ${eventType}`);
+
+  if (eventType === "page.updated") {
+    // entity.id is the page that was updated
+    const pageId = (event?.entity as Record<string, unknown>)?.id as
+      | string
+      | undefined;
+    if (pageId) {
+      // Fire-and-forget — acknowledge Notion immediately, sync in background
+      syncMainToOther(pageId).catch((err) =>
+        console.error(`[webhook/main] syncMainToOther error for ${pageId}:`, err)
+      );
+    }
+  }
 
   // Always acknowledge promptly — Notion will retry if we don't respond
   // within a few seconds.

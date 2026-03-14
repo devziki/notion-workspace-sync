@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 import { validateWebhook } from "@/lib/webhook";
+import { syncOtherToMain } from "@/lib/sync";
 
 export async function POST(request: NextRequest) {
   let body: unknown;
@@ -27,9 +28,20 @@ export async function POST(request: NextRequest) {
   }
 
   const event = body as Record<string, unknown>;
-  const eventType = event?.type ?? "unknown";
+  const eventType = (event?.type as string) ?? "unknown";
 
   console.log(`[webhook/other] Received event: ${eventType}`);
+
+  if (eventType === "page.updated") {
+    const pageId = (event?.entity as Record<string, unknown>)?.id as
+      | string
+      | undefined;
+    if (pageId) {
+      syncOtherToMain(pageId).catch((err) =>
+        console.error(`[webhook/other] syncOtherToMain error for ${pageId}:`, err)
+      );
+    }
+  }
 
   return NextResponse.json({ received: true, event: eventType });
 }

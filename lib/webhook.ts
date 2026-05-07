@@ -66,16 +66,15 @@ export async function validateWebhook(
   request: Request,
   secret: string | undefined
 ): Promise<{ rawBody: string; body: unknown }> {
-  if (!secret) {
-    console.error("Webhook secret is not configured.");
-    throw new Response("Server misconfiguration", { status: 500 });
-  }
-
   const rawBody = await getRawBody(request);
-  const signature = request.headers.get("x-notion-signature");
 
-  if (!verifyNotionSignature(rawBody, signature, secret)) {
-    throw new Response("Invalid signature", { status: 401 });
+  if (secret) {
+    const signature = request.headers.get("x-notion-signature");
+    if (!verifyNotionSignature(rawBody, signature, secret)) {
+      throw new Response("Invalid signature", { status: 401 });
+    }
+  } else {
+    console.warn("[webhook] No signing secret configured — skipping signature verification");
   }
 
   let body: unknown;

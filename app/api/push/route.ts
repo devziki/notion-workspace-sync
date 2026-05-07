@@ -10,7 +10,6 @@
  *   targetParentId:    string   — Other workspace database or page ID (required)
  *   targetParentType?: "database_id" | "page_id"  (default: "database_id")
  *   titlePropertyName?: string  — title property name in Other DB (default: "Name")
- *   force?:            boolean  — overwrite even if already pushed (default: false)
  * }
  *
  * Response 200 — page pushed successfully:
@@ -35,7 +34,6 @@ export async function POST(request: NextRequest) {
     targetParentId?: string;
     targetParentType?: "database_id" | "page_id";
     titlePropertyName?: string;
-    force?: boolean;
   };
 
   try {
@@ -74,24 +72,11 @@ export async function POST(request: NextRequest) {
       targetParentId: body.targetParentId,
       targetParentType: body.targetParentType,
       titlePropertyName: body.titlePropertyName,
-      force: body.force,
     });
-
-    if (result.alreadyExisted) {
-      return NextResponse.json({
-        ok: true,
-        alreadyExisted: true,
-        mainPageId: result.mainPageId,
-        otherPageId: result.otherPageId,
-        syncedAt: result.syncedAt,
-        message:
-          "Page already synced. Pass force:true to overwrite the body, or call the re-sync endpoint to update properties only.",
-      });
-    }
 
     return NextResponse.json({
       ok: true,
-      alreadyExisted: false,
+      created: !result.alreadyExisted,
       mainPageId: result.mainPageId,
       otherPageId: result.otherPageId,
       syncedAt: result.syncedAt,

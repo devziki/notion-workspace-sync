@@ -11,7 +11,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-const PUBLIC_PATHS = ["/api/webhook/main", "/api/webhook/other"];
+const PUBLIC_PATHS = ["/api/webhook/main", "/api/webhook/other", "/api/webhook/button", "/api/webhook/property-sync"];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

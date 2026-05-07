@@ -11,6 +11,7 @@
  *     when the source CDN URL expires (~1 hour after fetch).
  */
 
+import type { Client } from "@notionhq/client";
 import type { BlockObjectResponse } from "@notionhq/client/build/src/api-endpoints";
 
 // ---------------------------------------------------------------------------
@@ -154,31 +155,26 @@ function fixUrl(url: string): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Converts an array of Main-workspace blocks into Other-workspace create
- * bodies. Processes images and recurses into nested children.
+ * Converts an array of blocks with full inline children (used for simple
+ * cases where nesting depth is known to be shallow).
  */
 export async function convertBlocks(
-  blocks: BlockWithChildren[],
-  depth = 0
+  blocks: BlockWithChildren[]
 ): Promise<CreateBlockBody[]> {
   const result: CreateBlockBody[] = [];
   for (const block of blocks) {
-    const converted = await convertBlock(block, depth);
+    const converted = await convertBlock(block);
     if (converted !== null) result.push(converted);
   }
   return result;
 }
 
-// Notion rejects blocks.children.append when list-item nesting exceeds 2 levels.
-const MAX_CHILDREN_DEPTH = 2;
-
 async function convertBlock(
-  block: BlockWithChildren,
-  depth = 0
+  block: BlockWithChildren
 ): Promise<CreateBlockBody | null> {
   const children =
-    block._children && block._children.length > 0 && depth < MAX_CHILDREN_DEPTH
-      ? await convertBlocks(block._children, depth + 1)
+    block._children && block._children.length > 0
+      ? await convertBlocks(block._children)
       : undefined;
 
   switch (block.type) {
@@ -426,5 +422,147 @@ async function convertBlock(
     default:
       console.warn(`[push] Skipping unhandled block type: ${block.type}`);
       return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shallow conversion + recursive append
+// ---------------------------------------------------------------------------
+
+/**
+ * Converts a block WITHOUT inline children. Children are handled separately
+ * by appendBlocksRecursively, which avoids Notion's inline-nesting depth limit.
+ *
+ * Exceptions: table rows must be inline (tables require them on creation), and
+ * column_list requires column stubs inline (columns are populated separately).
+ */
+async function convertBlockShallow(
+  block: BlockWithChildren
+): Promise<CreateBlockBody | null> {
+  switch (block.type) {
+    case "paragraph":
+      return { type: "paragraph", paragraph: { rich_text: sanitiseRichText(block.paragraph.rich_text), color: block.paragraph.color } };
+    case "heading_1":
+      return { type: "heading_1", heading_1: { rich_text: sanitiseRichText(block.heading_1.rich_text), color: block.heading_1.color, is_toggleable: block.heading_1.is_toggleable } };
+    case "heading_2":
+      return { type: "heading_2", heading_2: { rich_text: sanitiseRichText(block.heading_2.rich_text), color: block.heading_2.color, is_toggleable: block.heading_2.is_toggleable } };
+    case "heading_3":
+      return { type: "heading_3", heading_3: { rich_text: sanitiseRichText(block.heading_3.rich_text), color: block.heading_3.color, is_toggleable: block.heading_3.is_toggleable } };
+    case "bulleted_list_item":
+      return { type: "bulleted_list_item", bulleted_list_item: { rich_text: sanitiseRichText(block.bulleted_list_item.rich_text), color: block.bulleted_list_item.color } };
+    case "numbered_list_item":
+      return { type: "numbered_list_item", numbered_list_item: { rich_text: sanitiseRichText(block.numbered_list_item.rich_text), color: block.numbered_list_item.color } };
+    case "to_do":
+      return { type: "to_do", to_do: { rich_text: sanitiseRichText(block.to_do.rich_text), checked: block.to_do.checked, color: block.to_do.color } };
+    case "toggle":
+      return { type: "toggle", toggle: { rich_text: sanitiseRichText(block.toggle.rich_text), color: block.toggle.color } };
+    case "code":
+      return { type: "code", code: { rich_text: sanitiseRichText(block.code.rich_text), caption: block.code.caption, language: block.code.language } };
+    case "quote":
+      return { type: "quote", quote: { rich_text: sanitiseRichText(block.quote.rich_text), color: block.quote.color } };
+    case "callout":
+      return { type: "callout", callout: { rich_text: sanitiseRichText(block.callout.rich_text), ...(block.callout.icon != null && { icon: block.callout.icon }), color: block.callout.color } };
+    case "divider":
+      return { type: "divider", divider: {} };
+    case "embed":
+      return { type: "embed", embed: { url: block.embed.url } };
+    case "bookmark":
+      return { type: "bookmark", bookmark: { url: block.bookmark.url, caption: block.bookmark.caption } };
+
+    case "image": {
+      const srcUrl = block.image.type === "external" ? block.image.external.url : block.image.type === "file" ? block.image.file.url : null;
+      if (!srcUrl) return null;
+      if (isNotionHostedUrl(srcUrl)) {
+        const uploadId = await reuploadNotionImage(srcUrl);
+        if (uploadId) return { type: "image", image: { type: "file_upload", file_upload: { id: uploadId }, caption: block.image.caption } };
+      }
+      return { type: "image", image: { type: "external", external: { url: srcUrl }, caption: block.image.caption } };
+    }
+    case "video":
+      if (block.video.type === "external") return { type: "video", video: { type: "external", external: { url: block.video.external.url } } };
+      return null;
+    case "file":
+      if (block.file.type === "external") return { type: "file", file: { type: "external", external: { url: block.file.external.url }, caption: block.file.caption } };
+      return null;
+    case "pdf":
+      if (block.pdf.type === "external") return { type: "pdf", pdf: { type: "external", external: { url: block.pdf.external.url }, caption: block.pdf.caption } };
+      return null;
+
+    case "table": {
+      // Rows must be inline on creation; table_rows have no further children so safe.
+      if (!block._children?.length) return null;
+      const rows = (await Promise.all(block._children.map(convertBlockShallow))).filter((r): r is CreateBlockBody => r !== null);
+      return rows.length > 0 ? { type: "table", table: { table_width: block.table.table_width, has_column_header: block.table.has_column_header, has_row_header: block.table.has_row_header, children: rows } } : null;
+    }
+    case "table_row":
+      return { type: "table_row", table_row: { cells: block.table_row.cells } };
+
+    case "column_list": {
+      // Columns must exist inline; column content is appended separately via appendBlocksRecursively.
+      if (!block._children?.length) return null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return { type: "column_list", column_list: { children: block._children.map(() => ({ type: "column" as const, column: {} as any })) } };
+    }
+    case "column":
+      return null; // never converted standalone; created as stubs inside column_list
+
+    case "child_page":
+    case "child_database":
+    case "synced_block":
+    case "table_of_contents":
+    case "breadcrumb":
+    case "link_to_page":
+    case "unsupported":
+      return null;
+
+    default:
+      console.warn(`[push] Skipping unhandled block type: ${block.type}`);
+      return null;
+  }
+}
+
+/**
+ * Appends blocks to parentId level-by-level: each block is converted without
+ * inline children, appended to get its created ID, then its children are
+ * appended recursively using that ID. This handles arbitrary nesting depth
+ * without hitting Notion's inline-children limit.
+ */
+export async function appendBlocksRecursively(
+  client: Client,
+  parentId: string,
+  blocks: BlockWithChildren[]
+): Promise<void> {
+  const CHUNK = 100;
+
+  // Convert all blocks shallowly, preserving the source→converted index mapping.
+  const pairs: { source: BlockWithChildren; converted: CreateBlockBody }[] = [];
+  for (const block of blocks) {
+    const c = await convertBlockShallow(block);
+    if (c !== null) pairs.push({ source: block, converted: c });
+  }
+
+  for (let i = 0; i < pairs.length; i += CHUNK) {
+    const chunk = pairs.slice(i, i + CHUNK);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const response = await client.blocks.children.append({ block_id: parentId, children: chunk.map(p => p.converted) as any });
+
+    for (let j = 0; j < Math.min(response.results.length, chunk.length); j++) {
+      const created = response.results[j];
+      const source = chunk[j].source;
+
+      if (!source._children?.length) continue;
+
+      if (source.type === "column_list") {
+        // Column IDs aren't in the creation response — fetch them separately.
+        const colsPage = await client.blocks.children.list({ block_id: created.id });
+        for (let k = 0; k < Math.min(colsPage.results.length, source._children.length); k++) {
+          const colContent = source._children[k]._children;
+          if (colContent?.length) await appendBlocksRecursively(client, colsPage.results[k].id, colContent);
+        }
+      } else {
+        await appendBlocksRecursively(client, created.id, source._children);
+      }
+    }
   }
 }

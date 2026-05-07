@@ -16,7 +16,8 @@ import type {
 } from "@notionhq/client/build/src/api-endpoints";
 import { getMainNotionClient, getOtherNotionClient } from "./notion";
 import { setFullSyncPair, getSyncPair } from "./kv";
-import { convertBlocks, type BlockWithChildren } from "./blocks";
+import { appendBlocksRecursively, type BlockWithChildren } from "./blocks";
+import { buildOtherUpdate } from "./sync";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -34,18 +35,13 @@ export interface PushOptions {
    * Only relevant when targetParentType is "database_id". Defaults to "Name".
    */
   titlePropertyName?: string;
-  /**
-   * When true, push even if a sync pair already exists (overwrites body).
-   * Defaults to false.
-   */
-  force?: boolean;
 }
 
 export interface PushResult {
   mainPageId: string;
   otherPageId: string;
   syncedAt: string;
-  /** True when a sync pair already existed and force was false — no push done. */
+  /** True when a sync pair already existed — page was updated, not created. */
   alreadyExisted: boolean;
 }
 
@@ -57,27 +53,17 @@ export async function pushPageToOther(
     targetParentId,
     targetParentType = "database_id",
     titlePropertyName = "Name",
-    force = false,
   } = options;
-
-  // ── 1. Check for existing sync pair ──────────────────────────────────────
-  const existing = await getSyncPair(mainPageId);
-  if (existing && !force) {
-    return {
-      mainPageId,
-      otherPageId: existing.other_id,
-      syncedAt: existing.synced_at,
-      alreadyExisted: true,
-    };
-  }
 
   const main = getMainNotionClient();
   const other = getOtherNotionClient();
 
-  // ── 2. Fetch source page ──────────────────────────────────────────────────
-  const sourcePage = (await main.pages.retrieve({
-    page_id: mainPageId,
-  })) as PageObjectResponse;
+  // ── 1 & 2 & 3. Fetch page + blocks + sync pair in parallel ───────────────
+  const [sourcePage, rawBlocks, existing] = await Promise.all([
+    main.pages.retrieve({ page_id: mainPageId }) as Promise<PageObjectResponse>,
+    fetchBlocksRecursively(main, mainPageId),
+    getSyncPair(mainPageId),
+  ]);
 
   const titleProp = Object.values(sourcePage.properties).find(
     (p) => p.type === "title"
@@ -85,58 +71,115 @@ export async function pushPageToOther(
   const titleRichText: RichTextItemResponse[] =
     titleProp?.type === "title" ? titleProp.title : [];
 
-  // ── 3. Fetch + convert blocks ─────────────────────────────────────────────
-  const rawBlocks = await fetchBlocksRecursively(main, mainPageId);
-  const convertedBlocks = await convertBlocks(rawBlocks);
+  const [mappedPropsBase] = await Promise.all([
+    buildOtherUpdate(sourcePage.properties),
+  ]);
 
-  // ── 4. Build parent + properties ─────────────────────────────────────────
+  const syncedAt = new Date().toISOString();
+
+  if (existing) {
+    // ── UPDATE path ──────────────────────────────────────────────────────────
+    let otherPageId = existing.other_id;
+
+    // Unarchive if needed, delete existing blocks — in parallel
+    try {
+      const otherPage = await other.pages.retrieve({ page_id: otherPageId }) as PageObjectResponse;
+      const [propUpdate] = await Promise.all([
+        Promise.resolve({ ...mappedPropsBase, [titlePropertyName]: { title: titleRichText } }),
+        otherPage.archived
+          ? other.pages.update({ page_id: otherPageId, archived: false })
+          : Promise.resolve(null),
+      ]);
+      await Promise.all([
+        other.pages.update({ page_id: otherPageId, properties: propUpdate }),
+        deleteAllBlocks(other, otherPageId),
+      ]);
+    } catch {
+      console.warn(`[push] Other page ${otherPageId} not found, will recreate`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const newPage = await other.pages.create({
+        parent: { database_id: targetParentId },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        properties: { [titlePropertyName]: { title: titleRichText } } as any,
+      });
+      otherPageId = newPage.id;
+      await setFullSyncPair(mainPageId, otherPageId, syncedAt);
+    }
+
+    await appendBlocksRecursively(other, otherPageId, rawBlocks);
+    await setFullSyncPair(mainPageId, otherPageId, syncedAt);
+    console.log(`[push] updated existing Other page ${otherPageId} for Main ${mainPageId}`);
+
+    return { mainPageId, otherPageId, syncedAt, alreadyExisted: true };
+  }
+
+  // ── CREATE path ───────────────────────────────────────────────────────────
   const parent =
     targetParentType === "database_id"
       ? { database_id: targetParentId }
       : { page_id: targetParentId };
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const properties: Record<string, any> =
-    targetParentType === "database_id"
-      ? { [titlePropertyName]: { title: titleRichText } }
-      : { title: { title: titleRichText } };
+  // Determine whether this task is delegated (Delegated To is set)
+  const delegatedToProp = sourcePage.properties["Delegated To"];
+  const isDelegated = delegatedToProp?.type === "select" && delegatedToProp.select !== null;
 
-  // ── 5. Create page with first 100 blocks ─────────────────────────────────
-  const CHUNK = 100;
-  const firstChunk = convertedBlocks.slice(0, CHUNK);
-  const remainder = convertedBlocks.slice(CHUNK);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const properties: Record<string, any> = {
+    ...mappedPropsBase,
+    [targetParentType === "database_id" ? titlePropertyName : "title"]: { title: titleRichText },
+    // Delegated to someone → force "To Do" regardless of current Main status.
+    // Self-assigned (empty Delegated To) → buildOtherUpdate already mapped the
+    // real status into mappedPropsBase; only fall back to "To Do" if no mapping.
+    ...(targetParentType === "database_id" && isDelegated
+      ? { Status: { status: { name: "To Do" } } }
+      : targetParentType === "database_id" && !mappedPropsBase["Status"]
+        ? { Status: { status: { name: "To Do" } } }
+        : {}),
+  };
 
   const newPage = await other.pages.create({
     parent,
-    properties,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    children: firstChunk as any,
+    properties: properties as any,
   });
 
-  // ── 6. Append remaining blocks in chunks ──────────────────────────────────
-  for (let i = 0; i < remainder.length; i += CHUNK) {
-    await other.blocks.children.append({
-      block_id: newPage.id,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      children: remainder.slice(i, i + CHUNK) as any,
-    });
-  }
+  await appendBlocksRecursively(other, newPage.id, rawBlocks);
 
-  // ── 7. Persist KV pair ───────────────────────────────────────────────────
-  const syncedAt = new Date().toISOString();
   await setFullSyncPair(mainPageId, newPage.id, syncedAt);
 
-  return {
-    mainPageId,
-    otherPageId: newPage.id,
-    syncedAt,
-    alreadyExisted: false,
-  };
+  // Mark the Main page as synced
+  await main.pages.update({
+    page_id: mainPageId,
+    properties: { "Synced To NS": { checkbox: true } },
+  });
+
+  console.log(`[push] created new Other page ${newPage.id} for Main ${mainPageId}`);
+
+  return { mainPageId, otherPageId: newPage.id, syncedAt, alreadyExisted: false };
 }
 
 // ---------------------------------------------------------------------------
-// Block fetching
+// Block helpers
 // ---------------------------------------------------------------------------
+
+/** Delete all top-level blocks on a page (used during upsert to replace body). */
+async function deleteAllBlocks(
+  client: ReturnType<typeof getOtherNotionClient>,
+  pageId: string
+): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const response = await client.blocks.children.list({
+      block_id: pageId,
+      start_cursor: cursor,
+      page_size: 100,
+    });
+    await Promise.all(
+      response.results.map((block) => client.blocks.delete({ block_id: block.id }))
+    );
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+}
 
 async function fetchBlocksRecursively(
   client: ReturnType<typeof getMainNotionClient>,

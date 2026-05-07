@@ -107,6 +107,49 @@ async function reuploadNotionImage(imageUrl: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Rich text sanitisation
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips any link whose URL is not a valid absolute URL (http/https/mailto).
+ * Notion rejects blocks that contain malformed href values.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function sanitiseRichText(richText: any[]): any[] {
+  if (!Array.isArray(richText)) return richText;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return richText.map((item): any => {
+    if (!item) return item;
+    // href is read-only in Notion's API — always strip it to avoid validation errors
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { href: _href, ...rest } = item;
+    // Fix text.link.url: convert relative Notion paths → absolute, strip truly invalid ones
+    if (rest.text?.link?.url) {
+      const fixed = fixUrl(rest.text.link.url);
+      return fixed
+        ? { ...rest, text: { ...rest.text, link: { url: fixed } } }
+        : { ...rest, text: { ...rest.text, link: null } };
+    }
+    return rest;
+  });
+}
+
+/** Normalise a URL for the Notion API — relative paths become absolute notion.so URLs. */
+function fixUrl(url: string): string | null {
+  if (!url) return null;
+  // Relative Notion page link e.g. /page-id or /page-id?v=view-id
+  if (url.startsWith("/")) {
+    const path = url.split("?")[0]; // drop view params
+    return `https://www.notion.so${path}`;
+  }
+  try {
+    const u = new URL(url);
+    if (u.protocol === "https:" || u.protocol === "http:" || u.protocol === "mailto:") return url;
+  } catch { /* fall through */ }
+  return null; // strip truly invalid URLs
+}
+
+// ---------------------------------------------------------------------------
 // Block conversion
 // ---------------------------------------------------------------------------
 
@@ -115,22 +158,27 @@ async function reuploadNotionImage(imageUrl: string): Promise<string | null> {
  * bodies. Processes images and recurses into nested children.
  */
 export async function convertBlocks(
-  blocks: BlockWithChildren[]
+  blocks: BlockWithChildren[],
+  depth = 0
 ): Promise<CreateBlockBody[]> {
   const result: CreateBlockBody[] = [];
   for (const block of blocks) {
-    const converted = await convertBlock(block);
+    const converted = await convertBlock(block, depth);
     if (converted !== null) result.push(converted);
   }
   return result;
 }
 
+// Notion rejects blocks.children.append when list-item nesting exceeds 2 levels.
+const MAX_CHILDREN_DEPTH = 2;
+
 async function convertBlock(
-  block: BlockWithChildren
+  block: BlockWithChildren,
+  depth = 0
 ): Promise<CreateBlockBody | null> {
   const children =
-    block._children && block._children.length > 0
-      ? await convertBlocks(block._children)
+    block._children && block._children.length > 0 && depth < MAX_CHILDREN_DEPTH
+      ? await convertBlocks(block._children, depth + 1)
       : undefined;
 
   switch (block.type) {
@@ -138,7 +186,7 @@ async function convertBlock(
       return {
         type: "paragraph",
         paragraph: {
-          rich_text: block.paragraph.rich_text,
+          rich_text: sanitiseRichText(block.paragraph.rich_text),
           color: block.paragraph.color,
           ...(children && { children }),
         },
@@ -148,7 +196,7 @@ async function convertBlock(
       return {
         type: "heading_1",
         heading_1: {
-          rich_text: block.heading_1.rich_text,
+          rich_text: sanitiseRichText(block.heading_1.rich_text),
           color: block.heading_1.color,
           is_toggleable: block.heading_1.is_toggleable,
         },
@@ -158,7 +206,7 @@ async function convertBlock(
       return {
         type: "heading_2",
         heading_2: {
-          rich_text: block.heading_2.rich_text,
+          rich_text: sanitiseRichText(block.heading_2.rich_text),
           color: block.heading_2.color,
           is_toggleable: block.heading_2.is_toggleable,
         },
@@ -168,7 +216,7 @@ async function convertBlock(
       return {
         type: "heading_3",
         heading_3: {
-          rich_text: block.heading_3.rich_text,
+          rich_text: sanitiseRichText(block.heading_3.rich_text),
           color: block.heading_3.color,
           is_toggleable: block.heading_3.is_toggleable,
         },
@@ -178,7 +226,7 @@ async function convertBlock(
       return {
         type: "bulleted_list_item",
         bulleted_list_item: {
-          rich_text: block.bulleted_list_item.rich_text,
+          rich_text: sanitiseRichText(block.bulleted_list_item.rich_text),
           color: block.bulleted_list_item.color,
           ...(children && { children }),
         },
@@ -188,7 +236,7 @@ async function convertBlock(
       return {
         type: "numbered_list_item",
         numbered_list_item: {
-          rich_text: block.numbered_list_item.rich_text,
+          rich_text: sanitiseRichText(block.numbered_list_item.rich_text),
           color: block.numbered_list_item.color,
           ...(children && { children }),
         },
@@ -198,7 +246,7 @@ async function convertBlock(
       return {
         type: "to_do",
         to_do: {
-          rich_text: block.to_do.rich_text,
+          rich_text: sanitiseRichText(block.to_do.rich_text),
           checked: block.to_do.checked,
           color: block.to_do.color,
           ...(children && { children }),
@@ -209,7 +257,7 @@ async function convertBlock(
       return {
         type: "toggle",
         toggle: {
-          rich_text: block.toggle.rich_text,
+          rich_text: sanitiseRichText(block.toggle.rich_text),
           color: block.toggle.color,
           ...(children && { children }),
         },
@@ -219,7 +267,7 @@ async function convertBlock(
       return {
         type: "code",
         code: {
-          rich_text: block.code.rich_text,
+          rich_text: sanitiseRichText(block.code.rich_text),
           caption: block.code.caption,
           language: block.code.language,
         },
@@ -229,7 +277,7 @@ async function convertBlock(
       return {
         type: "quote",
         quote: {
-          rich_text: block.quote.rich_text,
+          rich_text: sanitiseRichText(block.quote.rich_text),
           color: block.quote.color,
           ...(children && { children }),
         },
@@ -239,8 +287,8 @@ async function convertBlock(
       return {
         type: "callout",
         callout: {
-          rich_text: block.callout.rich_text,
-          icon: block.callout.icon,
+          rich_text: sanitiseRichText(block.callout.rich_text),
+          ...(block.callout.icon != null && { icon: block.callout.icon }),
           color: block.callout.color,
           ...(children && { children }),
         },

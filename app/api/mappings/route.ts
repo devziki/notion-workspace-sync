@@ -176,7 +176,7 @@ export async function POST(req: Request) {
     if (body.type === "project") {
       const { main_id, other_id } = body;
       if (other_id) {
-        await sb.from("project_mappings").upsert({ main_id, other_id });
+        await sb.from("project_mappings").upsert({ main_id, other_id }, { onConflict: "main_id" });
       } else {
         await sb.from("project_mappings").delete().eq("main_id", main_id);
       }
@@ -186,7 +186,7 @@ export async function POST(req: Request) {
     if (body.type === "user") {
       const { delegate_value, other_user_id } = body;
       if (other_user_id) {
-        await sb.from("user_mappings").upsert({ delegate_value, other_user_id });
+        await sb.from("user_mappings").upsert({ delegate_value, other_user_id }, { onConflict: "delegate_value" });
       } else {
         await sb.from("user_mappings").delete().eq("delegate_value", delegate_value);
       }
